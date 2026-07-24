@@ -171,7 +171,137 @@ DESCRIPTION is used when prompting for a command."
                     my/project-run-command))
   (put variable 'safe-local-variable #'stringp))
 
+;;; Project dashboard
+;;;
+;; A per-project landing page: branch/status, recent commits, and recent
+;; files. Replaces the "find a file to open" prompt that normally runs
+;; after switching to a project's workspace.
+
+(defvar-local my/project-dashboard-root nil
+  "Project root the current dashboard buffer is showing.")
+
+(defun my/project-dashboard--git (root &rest args)
+  "Run git ARGS in ROOT, returning trimmed stdout, or nil on failure."
+  (when (executable-find "git")
+    (let ((default-directory root))
+      (with-temp-buffer
+        (when (zerop (apply #'call-process "git" nil t nil args))
+          (string-trim (buffer-string)))))))
+
+(defun my/project-dashboard--recent-files (root limit)
+  "Return up to LIMIT entries from `recentf-list' living under ROOT."
+  (require 'recentf)
+  (let ((root (file-truename root)))
+    (seq-take
+     (seq-filter (lambda (file) (string-prefix-p root (file-truename file)))
+                 recentf-list)
+     limit)))
+
+(defun my/project-dashboard--insert-heading (text)
+  (insert (propertize text 'face 'magit-section-heading) "\n"))
+
+(defun my/project-dashboard--insert-file-button (file root)
+  (insert "  ")
+  (insert-text-button
+   (file-relative-name file root)
+   'action (lambda (_btn) (find-file file))
+   'follow-link t
+   'help-echo file)
+  (insert "\n"))
+
+(defun my/project-dashboard--insert-commit-button (line root)
+  "Insert LINE, a \"git log --oneline\" entry, as a clickable button."
+  (let ((hash (car (split-string line))))
+    (insert "  ")
+    (insert-text-button
+     line
+     'action (lambda (_btn)
+               (let ((default-directory root))
+                 (magit-show-commit hash)))
+     'follow-link t)
+    (insert "\n")))
+
+(defun my/project-dashboard--render (root)
+  "Render the project dashboard for ROOT into the current buffer."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (setq my/project-dashboard-root root
+          default-directory root)
+
+    (insert (propertize (doom-project-name root) 'face 'doom-dashboard-banner-face) "\n")
+    (insert (propertize (abbreviate-file-name root) 'face 'font-lock-comment-face) "\n\n")
+
+    (when-let (branch (my/project-dashboard--git root "rev-parse" "--abbrev-ref" "HEAD"))
+      (insert (propertize (format "On branch %s\n\n" branch) 'face 'magit-branch-current)))
+
+    (my/project-dashboard--insert-heading "Changes")
+    (let ((status (my/project-dashboard--git root "status" "--short")))
+      (if (and status (not (string-empty-p status)))
+          (dolist (line (split-string status "\n" t))
+            (insert "  " line "\n"))
+        (insert "  working tree clean\n")))
+    (insert "\n")
+
+    (my/project-dashboard--insert-heading "Recent commits")
+    (let ((log (my/project-dashboard--git root "log" "--oneline" "-10")))
+      (if (and log (not (string-empty-p log)))
+          (dolist (line (split-string log "\n" t))
+            (my/project-dashboard--insert-commit-button line root))
+        (insert "  (no commits)\n")))
+    (insert "\n")
+
+    (my/project-dashboard--insert-heading "Recent files")
+    (let ((files (my/project-dashboard--recent-files root 10)))
+      (if files
+          (dolist (file files)
+            (my/project-dashboard--insert-file-button file root))
+        (insert "  (none)\n")))
+    (insert "\n")
+
+    (insert (propertize "[s] status  [l] log  [f] find file  [g] refresh  [q] quit\n"
+                         'face 'font-lock-comment-face))
+    (goto-char (point-min))))
+
+(defun my/project-dashboard-refresh ()
+  "Refresh the project dashboard buffer."
+  (interactive)
+  (if my/project-dashboard-root
+      (my/project-dashboard--render my/project-dashboard-root)
+    (user-error "Not in a project dashboard buffer")))
+
+(defvar my/project-dashboard-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map "g" #'my/project-dashboard-refresh)
+    (define-key map "s" #'magit-status)
+    (define-key map "l" #'magit-log-current)
+    (define-key map "f" #'projectile-find-file)
+    (define-key map "q" #'quit-window)
+    map)
+  "Keymap for `my/project-dashboard-mode'.")
+
+(define-derived-mode my/project-dashboard-mode special-mode "Project-Dashboard"
+  "Major mode for the per-project dashboard buffer."
+  (setq truncate-lines t))
+
+(defun my/project-dashboard (&optional root)
+  "Open a dashboard (status, recent commits, recent files) for the
+project at ROOT, or the current project."
+  (interactive)
+  (let* ((root (file-truename (or root (my/project-root))))
+         (buf (get-buffer-create (format "*Project: %s*" (doom-project-name root)))))
+    (with-current-buffer buf
+      (my/project-dashboard-mode)
+      (my/project-dashboard--render root))
+    (switch-to-buffer buf)))
+
+;; Doom's workspaces module calls this after switching a project's
+;; workspace, instead of prompting to open a file.
+(setq +workspaces-switch-project-function #'my/project-dashboard)
+
 ;;; Keybindings
+;;;
+
 (map! :leader
       :desc "Execute command"
       "SPC" #'execute-extended-command
@@ -194,7 +324,19 @@ DESCRIPTION is used when prompting for a command."
 
        :desc "Help"
        "h" #'my/projectile-open-readme
-       ))
+
+       :desc "Switch project"
+       "p" #'my/projectile-switch-project
+
+       :desc "Add project"
+       "a" #'projectile-add-known-project
+
+       :desc "Project dashboard"
+       "d" #'my/project-dashboard
+       )
+
+      (:prefix-map ("d" . "dired")
+       :desc "Dired (current window)" "d" #'dired-jump))
 
 
 (defun my/projectile-forget-selected-project ()
@@ -236,18 +378,6 @@ DESCRIPTION is used when prompting for a command."
          #'my/projectile-forget-selected-project))
     (call-interactively #'projectile-switch-project)))
 
-(after! projectile
-  (map! :leader
-        (:prefix ("p" . "project")
-
-         :desc "Switch project"
-         "p" #'my/projectile-switch-project
-
-         :desc "Switch project"
-         "a" #'projectile-add-known-project
-         )
-        )
-  )
 
 (after! projectile
   (add-to-list 'projectile-project-root-files-bottom-up ".obsidian"))
@@ -305,6 +435,7 @@ DESCRIPTION is used when prompting for a command."
       :desc "New question" "q" #'my/new-question
       :desc "New thought"  "T" #'my/new-thought)
 
+
 (use-package! dictionary
   :commands (dictionary-lookup-definition)
   :config
@@ -313,3 +444,25 @@ DESCRIPTION is used when prompting for a command."
 
 (map! :leader
       :desc "Dictionary" "o d" #'dictionary-lookup-definition)
+
+(use-package! claude-code-ide
+  :commands (claude-code-ide
+             claude-code-ide-menu)
+  :config
+  ;; Gives Claude access to Emacs-aware tools such as xref,
+  ;; project information, imenu, and tree-sitter.
+  (claude-code-ide-emacs-tools-setup)
+
+  ;; Doom already supports vterm nicely.
+  (setq claude-code-ide-terminal-backend 'vterm)
+
+  ;; Open Claude on the right.
+  (setq claude-code-ide-window-side 'right
+        claude-code-ide-window-width 90)
+
+  (map! :leader
+        (:prefix ("a" . "AI")
+         :desc "Claude Code"       "c" #'claude-code-ide
+         :desc "Claude Code menu"  "m" #'claude-code-ide-menu
+         :desc "Toggle Claude"     "t" #'claude-code-ide-toggle
+         :desc "Resume session"    "r" #'claude-code-ide-resume)))
