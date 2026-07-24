@@ -306,7 +306,7 @@ project at ROOT, or the current project."
       :desc "Execute command"
       "SPC" #'execute-extended-command
 
-      (:prefix ("p" . "project")
+      (:prefix "p"
        :desc "Test project"
        "t" #'my/project-test
 
