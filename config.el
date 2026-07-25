@@ -445,6 +445,9 @@ project at ROOT, or the current project."
 (map! :leader
       :desc "Dictionary" "o d" #'dictionary-lookup-definition)
 
+(use-package! rescript-mode
+  :mode ("\\.resi?\\'" . rescript-mode))
+
 (use-package! claude-code-ide
   :commands (claude-code-ide
              claude-code-ide-menu)

@@ -57,3 +57,6 @@
 ;; Claude Code IDE integration (SPC a c / m / t / r), configured in config.el
 (package! claude-code-ide
   :recipe (:host github :repo "manzaltu/claude-code-ide.el"))
+
+;; ReScript (.res / .resi) syntax highlighting.
+(package! rescript-mode)
