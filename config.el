@@ -1239,9 +1239,15 @@ getting its own right after PERSONA's."
   (setq dictionary-default-dictionary "*")
   (setq dictionary-server "dict.org"))
 
+(defun my/tramp-hoshimi ()
+  "Open a Dired buffer on `hoshimi' via TRAMP over SSH."
+  (interactive)
+  (dired "/ssh:hoshimi:~/"))
+
 (map! :leader
-      :desc "Diary"      "o d" #'my/diary-open
-      :desc "Dictionary" "o D" #'dictionary-lookup-definition)
+      :desc "Diary"          "o d" #'my/diary-open
+      :desc "Dictionary"     "o D" #'dictionary-lookup-definition
+      :desc "Hoshimi (TRAMP)" "o h" #'my/tramp-hoshimi)
 
 (use-package! rescript-mode
   :mode ("\\.resi?\\'" . rescript-mode))
