@@ -2,6 +2,7 @@
 
 (setq doom-theme 'doom-one)
 (setq org-directory "~/org/")
+(setq display-line-numbers-type 'relative)
 
 ;;; Help
 (defun my/open-doom-config-file ()
@@ -541,7 +542,7 @@ a new one. Changes are persisted to the project's .dir-locals.el."
                  recentf-list)
      limit)))
 
-(defun my/project-dashboard--insert-heading (text)
+(defun my/--insert-heading (text)
   (insert (propertize text 'face 'magit-section-heading) "\n"))
 
 (defun my/project-dashboard--insert-file-button (file root)
@@ -578,7 +579,7 @@ a new one. Changes are persisted to the project's .dir-locals.el."
     (when-let (branch (my/project-dashboard--git root "rev-parse" "--abbrev-ref" "HEAD"))
       (insert (propertize (format "On branch %s\n\n" branch) 'face 'magit-branch-current)))
 
-    (my/project-dashboard--insert-heading "Changes")
+    (my/--insert-heading "Changes")
     (let ((status (my/project-dashboard--git root "status" "--short")))
       (if (and status (not (string-empty-p status)))
           (dolist (line (split-string status "\n" t))
@@ -586,7 +587,7 @@ a new one. Changes are persisted to the project's .dir-locals.el."
         (insert "  working tree clean\n")))
     (insert "\n")
 
-    (my/project-dashboard--insert-heading "Recent commits")
+    (my/--insert-heading "Recent commits")
     (let ((log (my/project-dashboard--git root "log" "--oneline" "-10")))
       (if (and log (not (string-empty-p log)))
           (dolist (line (split-string log "\n" t))
@@ -594,7 +595,7 @@ a new one. Changes are persisted to the project's .dir-locals.el."
         (insert "  (no commits)\n")))
     (insert "\n")
 
-    (my/project-dashboard--insert-heading "Recent files")
+    (my/--insert-heading "Recent files")
     (let ((files (my/project-dashboard--recent-files root 10)))
       (if files
           (dolist (file files)
@@ -685,6 +686,33 @@ project at ROOT, or the current project."
 ;; Global (non-leader) shortcut: open a new Dired buffer at $HOME.
 (map! "C-S-h" (cmd! (dired "~/")))
 
+;;; Git
+(defun my/github-create-repo ()
+  "Create a GitHub repository for the current project via `gh repo
+create' and push to it (`SPC g h n').
+
+Requires an existing local git repository (`SPC g i') and the `gh'
+CLI, authenticated (`gh auth login')."
+  (interactive)
+  (let ((root (my/project-root)))
+    (unless (file-directory-p (expand-file-name ".git" root))
+      (user-error "Not a git repository yet; run `SPC g i' first"))
+    (let* ((default-name (file-name-nondirectory (directory-file-name root)))
+           (name (read-string (format "GitHub repository name (%s): " default-name)
+                               nil nil default-name))
+           (visibility (completing-read "Visibility: " '("private" "public") nil t))
+           (default-directory root))
+      (compile (format "gh repo create %s --%s --source=. --remote=origin --push"
+                        (shell-quote-argument name)
+                        visibility)))))
+
+(map! :leader
+      (:prefix "g"
+       :desc "Init repo" "i" #'magit-init
+
+       (:prefix-map ("h" . "github")
+        :desc "New repo" "n" #'my/github-create-repo)))
+
 (defun my/projectile-forget-selected-project ()
   "Remove the currently highlighted Vertico project entry from Projectile."
   (interactive)
@@ -753,7 +781,7 @@ offer to `git init' it on the spot instead."
 ;; Zettelkasten-style notes: flat, tag-categorized, linked via org-roam.
 ;;
 (after! org
-  (setq org-roam-directory "/var/home/zz/Documents/org/roam/"
+  (setq org-roam-directory "/Users/tetibear/Org/roam/"
         org-roam-db-location (concat org-roam-directory ".org-roam.db")))
 
 (defvar my/note-categories
@@ -838,6 +866,513 @@ Every category prompts for an optional subcategory (hub) note to link to.")
       :desc "New note"     "n" #'my/new-note
       :desc "List notes"   "N" #'my/list-notes
       :desc "Diary (today)" "d" #'org-roam-dailies-goto-today)
+
+;;; Books
+;;;
+;; Each book is a subdirectory of `my/books-directory', named by slug
+;; and holding an "_book.org" with its #+TITLE. Chapters live flat
+;; inside their book's directory, each file named "NNN-slug.org" so
+;; filename order is reading order; reordering a chapter (`M-j'/`M-k'
+;; in `my/book-menu') renumbers files rather than relying on creation
+;; order. Each book appears as its own tile on the writing dashboard
+;; (`SPC o o'), renamable there with "r"; picking one, or its "Add
+;; book" tile, opens `my/book-menu', which shows that book's chapters
+;; as buttons (each renamable with "r"), plus "^" to go back to the
+;; dashboard.
+
+(defvar my/books-directory (expand-file-name "books/" org-directory)
+  "Directory containing one subdirectory per book.")
+
+(defun my/--org-title (file)
+  "Return FILE's #+TITLE, or its base filename if it has none yet."
+  (or (and (file-exists-p file)
+           (with-temp-buffer
+             (insert-file-contents file nil 0 2000)
+             (goto-char (point-min))
+             (when (re-search-forward "^#\\+TITLE:[ \t]*\\(.*\\)$" nil t)
+               (string-trim (match-string 1)))))
+      (file-name-base file)))
+
+(defun my/--org-set-title (file title)
+  "Set FILE's #+TITLE to TITLE, preserving the rest of its contents
+(or creating FILE with just that title if it doesn't exist yet)."
+  (let ((buf (find-buffer-visiting file)))
+    (with-temp-buffer
+      (when (file-exists-p file)
+        (insert-file-contents file))
+      (goto-char (point-min))
+      (if (re-search-forward "^#\\+TITLE:.*$" nil t)
+          (replace-match (concat "#+TITLE: " title) t t)
+        (insert (format "#+TITLE: %s\n" title)))
+      (write-region nil nil file nil 'quiet))
+    (when buf
+      (with-current-buffer buf (revert-buffer t t t)))))
+
+(defun my/--book-meta-file (book-dir)
+  (expand-file-name "_book.org" book-dir))
+
+(defun my/--book-title (book-dir)
+  "Return BOOK-DIR's book title, falling back to its directory name."
+  (let ((meta (my/--book-meta-file book-dir)))
+    (if (file-exists-p meta)
+        (my/--org-title meta)
+      (file-name-nondirectory (directory-file-name book-dir)))))
+
+(defun my/--books-list ()
+  "Return the existing book directories, sorted by title."
+  (when (file-directory-p my/books-directory)
+    (sort (seq-filter #'file-directory-p
+                       (directory-files my/books-directory t "\\`[^.]"))
+          (lambda (a b) (string< (my/--book-title a) (my/--book-title b))))))
+
+(defun my/book-add ()
+  "Create a new book and open its (empty) chapter list
+(`SPC o o', then its \"Add book\" tile)."
+  (interactive)
+  (make-directory my/books-directory t)
+  (let* ((title (string-trim (read-string "Book title: ")))
+         (dir (expand-file-name (my/--slug title) my/books-directory)))
+    (when (string-empty-p title)
+      (user-error "Book title can't be empty"))
+    (when (file-directory-p dir)
+      (user-error "A book named %S already exists" title))
+    (make-directory dir t)
+    (with-temp-buffer
+      (insert (format "#+TITLE: %s\n" title))
+      (write-region nil nil (my/--book-meta-file dir)))
+    (my/book-menu dir)))
+
+(defun my/--book-chapter-files (book-dir)
+  "Return BOOK-DIR's chapter files, sorted into reading order."
+  (when (file-directory-p book-dir)
+    (sort (directory-files book-dir t "\\`[0-9]\\{3,\\}-.*\\.org\\'")
+          #'string<)))
+
+(defun my/--book-chapter-number (file)
+  "Return FILE's chapter number, parsed from its filename prefix."
+  (if (string-match "\\`\\([0-9]+\\)-" (file-name-nondirectory file))
+      (string-to-number (match-string 1 (file-name-nondirectory file)))
+    0))
+
+(defun my/--book-chapter-set-number (file number)
+  "Rename FILE's chapter-number prefix to NUMBER, returning the new path.
+Used to reorder chapters, since filename order is reading order."
+  (let* ((dir (file-name-directory file))
+         (slug (if (string-match "\\`[0-9]+-\\(.*\\)\\.org\\'" (file-name-nondirectory file))
+                   (match-string 1 (file-name-nondirectory file))
+                 (file-name-sans-extension (file-name-nondirectory file))))
+         (new-file (expand-file-name (format "%03d-%s.org" number slug) dir)))
+    (unless (string= (expand-file-name file) new-file)
+      (rename-file file new-file)
+      (when-let ((buf (find-buffer-visiting file)))
+        (with-current-buffer buf (set-visited-file-name new-file t t))))
+    new-file))
+
+(defvar-local my/book-menu--book-dir nil
+  "Book directory the current chapter-list buffer is showing.")
+
+(defun my/book-add-chapter ()
+  "Create a new chapter in the current book and open it
+(`SPC o o', pick a book, then \"a\")."
+  (interactive)
+  (unless (derived-mode-p 'my/book-menu-mode)
+    (user-error "Not in a book's chapter list"))
+  (let* ((book-dir my/book-menu--book-dir)
+         (title (string-trim (read-string "Chapter title: ")))
+         (number (1+ (apply #'max 0 (mapcar #'my/--book-chapter-number
+                                             (my/--book-chapter-files book-dir)))))
+         (file (expand-file-name (format "%03d-%s.org" number (my/--slug title))
+                                  book-dir)))
+    (when (string-empty-p title)
+      (user-error "Chapter title can't be empty"))
+    (find-file file)
+    (when (= (buffer-size) 0)
+      (insert (format "#+TITLE: %s\n\n* \n\n" title))
+      (goto-char (point-max))
+      (save-buffer))))
+
+(defun my/book-menu--insert-chapter-button (file)
+  (insert "  ")
+  (insert-text-button
+   (format "%d. %s" (my/--book-chapter-number file) (my/--org-title file))
+   'action (lambda (_btn) (find-file file))
+   'follow-link t
+   'help-echo file
+   'my/file file)
+  (insert "\n"))
+
+(defun my/book-menu--chapter-file-at-point ()
+  "Return the chapter file for the button at point, or nil."
+  (when-let ((btn (button-at (point))))
+    (button-get btn 'my/file)))
+
+(defun my/book-menu--render ()
+  (let ((inhibit-read-only t)
+        (book-dir my/book-menu--book-dir))
+    (erase-buffer)
+    (setq default-directory book-dir)
+    (insert (propertize (my/--book-title book-dir) 'face 'doom-dashboard-banner-face) "\n")
+    (insert (propertize (abbreviate-file-name book-dir) 'face 'font-lock-comment-face) "\n\n")
+    (my/--insert-heading "Chapters")
+    (let ((files (my/--book-chapter-files book-dir)))
+      (if files
+          (dolist (file files)
+            (my/book-menu--insert-chapter-button file))
+        (insert "  (no chapters yet)\n")))
+    (insert "\n  ")
+    (insert-text-button "+ Add a chapter..."
+                         'action (lambda (_btn) (my/book-add-chapter))
+                         'follow-link t)
+    (insert "\n\n")
+    (insert (propertize "RET/click: open   a: add chapter   r: rename   M-j/M-k: move   ^: back to books   g: refresh   q: quit\n"
+                         'face 'font-lock-comment-face))
+    (goto-char (point-min))))
+
+(defun my/book-menu-refresh ()
+  "Refresh the current book's chapter list."
+  (interactive)
+  (my/book-menu--render))
+
+(defun my/book-menu-rename-chapter ()
+  "Rename the chapter at point, i.e. set its #+TITLE
+(`SPC o o', pick a book, then \"r\")."
+  (interactive)
+  (unless (derived-mode-p 'my/book-menu-mode)
+    (user-error "Not in a book's chapter list"))
+  (let ((file (my/book-menu--chapter-file-at-point)))
+    (unless file
+      (user-error "No chapter at point"))
+    (let ((title (string-trim (read-string "New chapter title: " (my/--org-title file)))))
+      (when (string-empty-p title)
+        (user-error "Chapter title can't be empty"))
+      (my/--org-set-title file title)))
+  (my/book-menu--render))
+
+(defun my/book-menu--goto-file (file)
+  "Move point to FILE's chapter button, if currently displayed."
+  (goto-char (point-min))
+  (let ((pos (next-button (point-min) t)))
+    (while (and pos (not (equal (button-get (button-at pos) 'my/file) file)))
+      (setq pos (next-button pos)))
+    (when pos (goto-char pos))))
+
+(defun my/book-menu--move-chapter (delta)
+  "Move the chapter at point DELTA places (-1: earlier, 1: later)
+in reading order, renumbering files as needed."
+  (unless (derived-mode-p 'my/book-menu-mode)
+    (user-error "Not in a book's chapter list"))
+  (let ((file (my/book-menu--chapter-file-at-point)))
+    (unless file
+      (user-error "No chapter at point"))
+    (let* ((files (my/--book-chapter-files my/book-menu--book-dir))
+           (idx (seq-position files file #'string=))
+           (other-idx (and idx (+ idx delta))))
+      (unless (and other-idx (>= other-idx 0) (< other-idx (length files)))
+        (user-error "Already at the %s" (if (> delta 0) "end" "start")))
+      (let* ((other (nth other-idx files))
+             (n1 (my/--book-chapter-number file))
+             (n2 (my/--book-chapter-number other))
+             (holding (1+ (apply #'max (mapcar #'my/--book-chapter-number files))))
+             (moved (my/--book-chapter-set-number file holding)))
+        (my/--book-chapter-set-number other n1)
+        (let ((final (my/--book-chapter-set-number moved n2)))
+          (my/book-menu--render)
+          (my/book-menu--goto-file final))))))
+
+(defun my/book-menu-move-chapter-down ()
+  "Move the chapter at point later in reading order (`M-j')."
+  (interactive)
+  (my/book-menu--move-chapter 1))
+
+(defun my/book-menu-move-chapter-up ()
+  "Move the chapter at point earlier in reading order (`M-k')."
+  (interactive)
+  (my/book-menu--move-chapter -1))
+
+(defvar my/book-menu-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map "a" #'my/book-add-chapter)
+    (define-key map "r" #'my/book-menu-rename-chapter)
+    (define-key map (kbd "M-j") #'my/book-menu-move-chapter-down)
+    (define-key map (kbd "M-k") #'my/book-menu-move-chapter-up)
+    (define-key map "q" #'quit-window)
+    map)
+  "Keymap for `my/book-menu-mode'.")
+
+;; "^" and "g" are motions (evil-first-non-blank / the goto-map
+;; prefix), bound with higher priority than a plain `define-key' by
+;; evil's own normal-state-map -- `special-mode' (our parent) gets
+;; NORMAL state by default, same as `tabulated-list-mode' above.
+;; `map!' with an explicit state binds through evil's own override
+;; mechanism instead, so it wins.
+(map! :map my/book-menu-mode-map
+      :n "^" #'my/writing-dashboard
+      :n "g" #'my/book-menu-refresh)
+
+(define-derived-mode my/book-menu-mode special-mode "Book"
+  "Major mode listing one book's chapters, with an \"Add a chapter...\"
+entry to create the next one, \"r\" to rename the chapter at point,
+\"M-j\"/\"M-k\" to reorder it, and \"^\" to return to the book list."
+  (setq truncate-lines t))
+
+(defun my/book-menu (book-dir)
+  "Open BOOK-DIR's chapter list."
+  (let ((buf (get-buffer-create (format "*Book: %s*" (my/--book-title book-dir)))))
+    (with-current-buffer buf
+      (my/book-menu-mode)
+      (setq my/book-menu--book-dir book-dir)
+      (my/book-menu--render))
+    (switch-to-buffer buf)))
+
+;;; Writing dashboard
+;;;
+;; A landing page for writing (`SPC o o'), laid out as a row of ASCII-
+;; art tiles: a notebook (new note), one tile per in-progress book,
+;; an "Add book" tile, and a diary tile. "h"/"j"/"k"/"l" move the
+;; selection between tiles (wrapping, and wrapping into further rows
+;; if there isn't room for them all on one line) and RET activates
+;; whichever tile is selected.
+
+(defconst my/writing-dashboard--tile-width 11
+  "Display width of one tile's art/label column.")
+
+(defconst my/writing-dashboard--tile-gap 2
+  "Spaces between adjacent tile columns.")
+
+(defconst my/writing-dashboard--art-notebook
+  '("┌─────┐"
+    "│≡ ≡ ≡│"
+    "│≡ ≡ ≡│"
+    "└─────┘")
+  "ASCII art for the \"new note\" tile.")
+
+(defconst my/writing-dashboard--art-book
+  '("       "
+    "▛▀▀▀▀▀▜"
+    "▌     ▐"
+    "▙▄▄▄▄▄▟")
+  "ASCII art for a book tile.")
+
+(defconst my/writing-dashboard--art-diary
+  '("       "
+    "▛▀▀▀▀▀▜"
+    "▌  ♥  ▐"
+    "▙▄▄▄▄▄▟")
+  "ASCII art for the diary tile.")
+
+(defconst my/writing-dashboard--art-add-book
+  '("┌─────┐"
+    "│     │"
+    "│  +  │"
+    "└─────┘")
+  "ASCII art for the \"add a book\" tile.")
+
+(defvar-local my/writing-dashboard--index 0
+  "Index of the currently selected tile.")
+
+(defun my/writing-dashboard--tiles ()
+  "Notebook, one tile per in-progress book, \"Add book\", then diary."
+  (append
+   (list (list :label "Notebook" :art my/writing-dashboard--art-notebook
+               :action #'my/new-note))
+   (mapcar (lambda (dir)
+             (list :label (my/--book-title dir)
+                   :art my/writing-dashboard--art-book
+                   :dir dir
+                   :action (lambda () (my/book-menu dir))))
+           (my/--books-list))
+   (list (list :label "Add book" :art my/writing-dashboard--art-add-book
+               :action #'my/book-add))
+   (list (list :label "Diary" :art my/writing-dashboard--art-diary
+               :action #'org-roam-dailies-goto-today))))
+
+(defun my/writing-dashboard--per-row (count)
+  "How many of COUNT tiles fit per row at the current window width."
+  (max 1 (min count (/ (window-body-width)
+                        (+ my/writing-dashboard--tile-width
+                           my/writing-dashboard--tile-gap)))))
+
+(defun my/writing-dashboard--center (text width)
+  "Center TEXT in a field WIDTH wide, truncating if it doesn't fit."
+  (let* ((text (if (> (string-width text) width)
+                    (truncate-string-to-width text width nil nil "…")
+                  text))
+         (pad (- width (string-width text)))
+         (left (/ pad 2)))
+    (concat (make-string left ?\s) text (make-string (- pad left) ?\s))))
+
+(defun my/writing-dashboard--tile-cell (text selected)
+  "Center TEXT in one tile column, highlighted when SELECTED."
+  (let ((cell (my/writing-dashboard--center text my/writing-dashboard--tile-width)))
+    (if selected (propertize cell 'face 'highlight) cell)))
+
+(defun my/writing-dashboard--row-line (row line-fn selected-idx)
+  "Render one display line across ROW, a list of (IDX . TILE), using
+LINE-FN to pull that line's text out of each tile."
+  (mapconcat
+   (lambda (idx-tile)
+     (my/writing-dashboard--tile-cell (funcall line-fn (cdr idx-tile))
+                                       (= (car idx-tile) selected-idx)))
+   row
+   (make-string my/writing-dashboard--tile-gap ?\s)))
+
+(defun my/writing-dashboard--insert-centered (text &optional face)
+  (let* ((width (window-body-width))
+         (pad (max 0 (/ (- width (string-width text)) 2))))
+    (insert (make-string pad ?\s)
+            (if face (propertize text 'face face) text)
+            "\n")))
+
+(defun my/writing-dashboard--insert-wrapped-centered (text &optional face)
+  "Word-wrap TEXT to the window width, inserting each line centered.
+Tile labels truncate hard at `my/writing-dashboard--tile-width'; this is
+where the selected tile's full, untruncated title actually gets read."
+  (let* ((fill-column (max 20 (- (window-body-width) 8)))
+         (wrapped (with-temp-buffer
+                    (insert text)
+                    (fill-region (point-min) (point-max))
+                    (buffer-string))))
+    (dolist (line (split-string wrapped "\n"))
+      (my/writing-dashboard--insert-centered line face))))
+
+(defun my/writing-dashboard--render ()
+  (let* ((inhibit-read-only t)
+         (tiles (my/writing-dashboard--tiles))
+         (count (length tiles)))
+    (setq my/writing-dashboard--index
+          (if (zerop count) 0 (mod my/writing-dashboard--index count)))
+    (erase-buffer)
+    (insert "\n\n")
+    (let* ((title " WRITING ")
+           (rule (make-string (string-width title) ?═)))
+      (my/writing-dashboard--insert-centered (concat "╔" rule "╗") 'doom-dashboard-banner-face)
+      (my/writing-dashboard--insert-centered (concat "║" title "║") 'doom-dashboard-banner-face)
+      (my/writing-dashboard--insert-centered (concat "╚" rule "╝") 'doom-dashboard-banner-face))
+    (insert "\n")
+    (if (zerop count)
+        (my/writing-dashboard--insert-centered "a quiet place to put words down" 'font-lock-comment-face)
+      (my/writing-dashboard--insert-wrapped-centered
+       (plist-get (nth my/writing-dashboard--index tiles) :label)
+       'doom-dashboard-banner-face))
+    (insert "\n\n")
+    (if (zerop count)
+        (my/writing-dashboard--insert-centered "(nothing here yet)" 'font-lock-comment-face)
+      (let* ((per-row (my/writing-dashboard--per-row count))
+             (col-step (+ my/writing-dashboard--tile-width my/writing-dashboard--tile-gap))
+             (indexed (seq-map-indexed (lambda (tile idx) (cons idx tile)) tiles))
+             (rows (seq-partition indexed per-row)))
+        (dolist (row rows)
+          (let* ((row-width (- (* (length row) col-step) my/writing-dashboard--tile-gap))
+                 (indent (make-string (max 0 (/ (- (window-body-width) row-width) 2)) ?\s)))
+            (dotimes (line 4)
+              (insert indent
+                      (my/writing-dashboard--row-line
+                       row (lambda (tile) (nth line (plist-get tile :art)))
+                       my/writing-dashboard--index)
+                      "\n"))
+            (insert indent
+                    (my/writing-dashboard--row-line
+                     row (lambda (tile) (plist-get tile :label))
+                     my/writing-dashboard--index)
+                    "\n\n")))))
+    (my/writing-dashboard--insert-centered "h/j/k/l: move   RET: open   r: rename   g: refresh   q: quit"
+                                            'font-lock-comment-face)
+    (goto-char (point-min))))
+
+(defun my/writing-dashboard-refresh ()
+  "Refresh the writing dashboard buffer."
+  (interactive)
+  (my/writing-dashboard--render))
+
+(defun my/writing-dashboard--move (delta)
+  (let ((count (length (my/writing-dashboard--tiles))))
+    (when (> count 0)
+      (setq my/writing-dashboard--index (mod (+ my/writing-dashboard--index delta) count))
+      (my/writing-dashboard--render))))
+
+(defun my/writing-dashboard-left ()
+  "Select the previous tile (`h')."
+  (interactive)
+  (my/writing-dashboard--move -1))
+
+(defun my/writing-dashboard-right ()
+  "Select the next tile (`l')."
+  (interactive)
+  (my/writing-dashboard--move 1))
+
+(defun my/writing-dashboard-down ()
+  "Select the tile one row down (`j')."
+  (interactive)
+  (my/writing-dashboard--move (my/writing-dashboard--per-row (length (my/writing-dashboard--tiles)))))
+
+(defun my/writing-dashboard-up ()
+  "Select the tile one row up (`k')."
+  (interactive)
+  (my/writing-dashboard--move (- (my/writing-dashboard--per-row (length (my/writing-dashboard--tiles))))))
+
+(defun my/writing-dashboard-activate ()
+  "Run the action of the currently selected tile (RET)."
+  (interactive)
+  (let ((tiles (my/writing-dashboard--tiles)))
+    (when tiles
+      (funcall (plist-get (nth my/writing-dashboard--index tiles) :action)))))
+
+(defun my/writing-dashboard-rename ()
+  "Rename the currently selected book (`r')."
+  (interactive)
+  (let* ((tiles (my/writing-dashboard--tiles))
+         (tile (nth my/writing-dashboard--index tiles))
+         (dir (plist-get tile :dir)))
+    (unless dir
+      (user-error "This tile can't be renamed"))
+    (let ((title (string-trim (read-string "New book title: " (my/--book-title dir)))))
+      (when (string-empty-p title)
+        (user-error "Book title can't be empty"))
+      (my/--org-set-title (my/--book-meta-file dir) title)))
+  (my/writing-dashboard--render))
+
+(defvar my/writing-dashboard-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    map)
+  "Keymap for `my/writing-dashboard-mode'.")
+
+;; "h"/"j"/"k"/"l", RET and "g" are all motions (or the goto-map
+;; prefix), bound with higher priority than a plain `define-key' by
+;; evil's own normal-state-map -- `special-mode' (our parent) gets
+;; NORMAL state by default, same as `tabulated-list-mode' above.
+;; `map!' with an explicit state binds through evil's own override
+;; mechanism instead, so it wins.
+(map! :map my/writing-dashboard-mode-map
+      :n "h"   #'my/writing-dashboard-left
+      :n "l"   #'my/writing-dashboard-right
+      :n "j"   #'my/writing-dashboard-down
+      :n "k"   #'my/writing-dashboard-up
+      :n "RET" #'my/writing-dashboard-activate
+      :n "r"   #'my/writing-dashboard-rename
+      :n "g"   #'my/writing-dashboard-refresh
+      :n "q"   #'quit-window)
+
+(define-derived-mode my/writing-dashboard-mode special-mode "Writing-Dashboard"
+  "Major mode for the writing dashboard (`SPC o o'). \"r\" renames
+the selected book."
+  (setq truncate-lines t
+        cursor-type nil))
+
+(defun my/writing-dashboard ()
+  "Open the writing dashboard (`SPC o o')."
+  (interactive)
+  (let ((buf (get-buffer-create "*Writing Dashboard*")))
+    (with-current-buffer buf
+      (my/writing-dashboard-mode)
+      (my/writing-dashboard--render))
+    (switch-to-buffer buf)))
+
+;; Overrides the macOS-only default "SPC o o" (`+macos/reveal-in-finder').
+(map! :leader
+      (:prefix "o"
+       :desc "Writing dashboard" "o" #'my/writing-dashboard))
 
 ;;; Diary
 ;;;
